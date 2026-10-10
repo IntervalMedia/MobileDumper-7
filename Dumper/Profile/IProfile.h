@@ -331,9 +331,14 @@ public:
 		{
 			auto Layout = reinterpret_cast<FNamePoolLayout*>(NamesLayout.get());
 
-			const uintptr_t HeaderAddr       = NameEntry + Layout->FNameEntry.Header;
-			const uint16 HeaderWithoutNumber = GDecryptCallbacks.NamePool.FNameEntry.Header(GMemory->Read<uint16>(HeaderAddr), HeaderAddr);
-			const int32 NameLen              = Layout->FNameEntry.GetLength(HeaderWithoutNumber);
+			auto ReadEntryHeader = [&Layout](uintptr_t Entry) -> uint16
+			{
+				const uintptr_t HeaderAddr = Entry + Layout->FNameEntry.Header;
+				return GDecryptCallbacks.NamePool.FNameEntry.Header(GMemory->Read<uint16>(HeaderAddr), HeaderAddr);
+			};
+
+			uint16 HeaderWithoutNumber = ReadEntryHeader(NameEntry);
+			int32 NameLen              = Layout->FNameEntry.GetLength(HeaderWithoutNumber);
 
 			if (NameLen == 0)
 			{
@@ -345,6 +350,9 @@ public:
 
 				if (!GMemory->IsAddressReadable(NameEntry))
 					return std::wstring();
+
+				HeaderWithoutNumber = ReadEntryHeader(NameEntry);
+				NameLen             = Layout->FNameEntry.GetLength(HeaderWithoutNumber);
 			}
 
 			IsWide  = Layout->FNameEntry.GetIsWide(HeaderWithoutNumber);
