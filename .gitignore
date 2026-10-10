@@ -13,6 +13,7 @@ AndKittyInjector
 SDKTest/
 
 __pycache__/
+examples/
 
 # Build results
 [Bb]uild/
