@@ -108,42 +108,25 @@ struct FSettings
 		/// (e.g. @c "xorstr.hpp").  Empty string disables the include.
 		std::string XORStringInclude = "";
 
-		/// Customisable body for @c InSDKUtils::GetImageBase().
-		/// Replace the placeholder @c return with the real image-base expression
-		/// for the target platform.
-		std::string GetImageBaseFuncBody =
-		    R"({
-	return 0; // Set via InSDKUtils::GetImageBase() before use
-}
-)";
+		/// Override body for @c InSDKUtils::GetImageBase().
+		/// Empty emits a default that resolves the Unreal module by name at runtime.
+		std::string GetImageBaseFuncBody = "";
 
-		/// Customisable body for @c InSDKUtils::GetGNames().
-		std::string GetGNamesFuncBody =
-		    R"({
-	return 0; // Set via InSDKUtils::GetGNames() before use
-}
-)";
+		/// Override body for @c InSDKUtils::GetGNames().
+		/// Empty emits a default built for the layout that was detected.
+		std::string GetGNamesFuncBody = "";
 
-		/// Customisable body for @c InSDKUtils::GetGObjects().
-		std::string GetGObjectsBody =
-		    R"({
-	return nullptr; // Set via InSDKUtils::GetGObjects() before use
-}
-)";
+		/// Override body for @c InSDKUtils::GetGObjects().
+		/// Empty emits a default built for the layout that was detected.
+		std::string GetGObjectsBody = "";
 
-		/// Customisable body for @c InSDKUtils::GetNameByIndex().
-		std::string GetNameByIndexFuncBody =
-		    R"({
-	return ""; // Set via InSDKUtils::GetNameByIndex(int32 Index) before use
-}
-)";
+		/// Override body for @c InSDKUtils::GetNameByIndex().
+		/// Empty emits a default built for the layout that was detected.
+		std::string GetNameByIndexFuncBody = "";
 
-		/// Customisable body for @c InSDKUtils::GetObjectByIndex().
-		std::string GetObjectByIndexFuncBody =
-		    R"({
-	return nullptr; // Set via InSDKUtils::GetObjectByIndex(int32 Index) before use
-}
-)";
+		/// Override body for @c InSDKUtils::GetObjectByIndex().
+		/// Empty emits a default built for the layout that was detected.
+		std::string GetObjectByIndexFuncBody = "";
 
 		/// Customisable body for @c InSDKUtils::CallGameFunction.
 		std::string CallGameFunction =
@@ -286,6 +269,29 @@ namespace InternalSettings
 	/// Whether the engine uses @c char16_t for FName strings (UE 4.21+).
 	/// Auto-detected by @c UEAnalyzer::GetTCharKind() and @c FInSDKOffsets::InitFText().
 	inline bool bUseChar16String = true;
+
+	/// Whether @c Offsets::GObjects holds a pointer to the object array rather than
+	/// being the array itself. Set by @c Generator::InitObjects, which accepts either.
+	inline bool bIsGObjectsPointer = false;
+
+	/// Whether @c Offsets::GNames holds a pointer to the names container rather than
+	/// being the container itself. Set by @c Generator::InitNames, which accepts either.
+	inline bool bIsGNamesPointer = false;
+
+	/// Filename of the Unreal module the offsets were measured against, e.g. @c "libUE4.so".
+	/// Set by @c Generator::InitUnrealModule; the generated SDK resolves this name at runtime to
+	/// recover the value @c ModuleInfo::GetBase() had when the dump was taken.
+	inline std::string UnrealModuleFileName = "";
+
+	/// Detected engine version. Zeroed when detection failed, which the SDK reports as
+	/// an unknown version rather than a wrong one.
+	inline int32 EngineMajor = 0;
+	inline int32 EngineMinor = 0;
+	inline int32 EnginePatch = 0;
+
+	/// Full engine version string as the engine formats it, e.g.
+	/// @c "4.27.2-0+++UE4+Release-4.27". Empty when detection failed.
+	inline std::string EngineVersionString = "";
 
 	/// Detect and set @c bIsWeakObjectPtrWithoutTag.
 	extern void InitWeakObjectPtrSettings();

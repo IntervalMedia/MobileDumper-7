@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 
 #include "../../Architecture/IArchDecoder.h"
@@ -49,6 +50,8 @@ bool Generator::InitUnrealModule(std::string& OutErrorString)
 	GLogger.FmtWrite(ELogLevel::Info, "End: 0x{:X}\n", ModInfo.GetEnd());
 	GLogger.FmtWrite(ELogLevel::Info, "Base: 0x{:X}\n", ModInfo.GetBase());
 
+	InternalSettings::UnrealModuleFileName = std::filesystem::path(ModInfo.GetPathName()).filename().string();
+
 	if (ModInfo.GetSegments().empty())
 	{
 		OutErrorString = "Failed to aquire UnrealEngine segments!";
@@ -82,8 +85,18 @@ bool Generator::InitUEAnalyzerKitty(std::string& OutErrorString)
 	}
 
 	InternalSettings::bUseChar16String = Analyzer.GetTCharKind() != UEAnalyzerKitty::ETCharKind::Char32;
+	GLogger.FmtWrite(ELogLevel::Info, "UE Engine TChar: UTF{}\n", InternalSettings::bUseChar16String ? "16" : "32");
 
-	GLogger.FmtWrite(ELogLevel::Info, "Game build is likely using UTF{} FName strings.\n", InternalSettings::bUseChar16String ? "16" : "32");
+	const UEAnalyzerKitty::FEngineVersionInfo& EngineVersion = Analyzer.GetEngineVersion();
+	GLogger.FmtWrite(ELogLevel::Info, "UE Engine Version: {}\n", EngineVersion.ToString());
+
+	if (EngineVersion.IsValid())
+	{
+		InternalSettings::EngineMajor         = EngineVersion.Major;
+		InternalSettings::EngineMinor         = EngineVersion.Minor;
+		InternalSettings::EnginePatch         = EngineVersion.Patch;
+		InternalSettings::EngineVersionString = EngineVersion.ToString();
+	}
 
 	return true;
 }
@@ -151,7 +164,8 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		GObjects = Address;
 		if (TryGObjectsAt(GObjects, "Direct"))
 		{
-			GInSDKOffsets.Statics.GObjects = ObjectsOffset;
+			GInSDKOffsets.Statics.GObjects       = ObjectsOffset;
+			InternalSettings::bIsGObjectsPointer = false;
 			GLogger.FmtWrite(ELogLevel::Info, "InitObjects: GObjects accepted at 0x{:X} (Direct)\n", GObjects);
 			return true;
 		}
@@ -167,7 +181,8 @@ bool Generator::InitObjects(std::string& OutErrorString)
 
 		if (TryGObjectsAt(GObjects, "Dereference"))
 		{
-			GInSDKOffsets.Statics.GObjects = ObjectsOffset;
+			GInSDKOffsets.Statics.GObjects       = ObjectsOffset;
+			InternalSettings::bIsGObjectsPointer = true;
 			GLogger.FmtWrite(ELogLevel::Info, "InitObjects: GObjects accepted at 0x{:X} (Dereference of 0x{:X})\n", GObjects, Address);
 			return true;
 		}
@@ -184,11 +199,17 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "InitObjects: IProfile::GetGObjects() returned valid address (0x{:X})\n", GObjects);
 
 		bSuccess = InitGObjectsVars(GObjects, "User Profile", 1.00f);
+
+		if (!bSuccess)
+			GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: IProfile::GetGObjects() returned address 0x{:X} did not validate, falling back to UEAnalyzerKitty...\n", GObjects);
 	}
 	else
 	{
 		GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: IProfile::GetGObjects() returned invalid address (0x{:X}), falling back to UEAnalyzerKitty...\n", GObjects);
+	}
 
+	if (!bSuccess)
+	{
 		auto Result = Generator::Analyzer.Find(UEAnalyzerKitty::Targets::GUObjectArray);
 		if (Result.Candidates.empty())
 		{
@@ -257,6 +278,8 @@ bool Generator::InitObjects(std::string& OutErrorString)
 	{
 		return GProfile->GetObjectByIndex(GObjects, GLayouts.ObjectsLayout, Index);
 	});
+
+	// LayoutDetection::DumpCandidateMemory(GObjects, "GObjects");
 
 	/*
 	{
@@ -372,7 +395,8 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GNames = Address;
 		if (TryGNamesAt(GNames, "Direct"))
 		{
-			GInSDKOffsets.Statics.GNames = NamesOffset;
+			GInSDKOffsets.Statics.GNames       = NamesOffset;
+			InternalSettings::bIsGNamesPointer = false;
 			GLogger.FmtWrite(ELogLevel::Info, "InitNames: GNames accepted at 0x{:X} (Direct)\n", GNames);
 			return true;
 		}
@@ -388,7 +412,8 @@ bool Generator::InitNames(std::string& OutErrorString)
 
 		if (TryGNamesAt(GNames, "Dereference"))
 		{
-			GInSDKOffsets.Statics.GNames = NamesOffset;
+			GInSDKOffsets.Statics.GNames       = NamesOffset;
+			InternalSettings::bIsGNamesPointer = true;
 			GLogger.FmtWrite(ELogLevel::Info, "InitNames: GNames accepted at 0x{:X} (Dereference of 0x{:X})\n", GNames, Address);
 			return true;
 		}
@@ -405,11 +430,17 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "InitNames: IProfile::GetGNames() returned valid address (0x{:X})\n", GNames);
 
 		bSuccess = InitGNamesVars(GNames, "User Profile", 1.00f);
+
+		if (!bSuccess)
+			GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: IProfile::GetGNames() returned address 0x{:X} did not validate, falling back to UEAnalyzerKitty...\n", GObjects);
 	}
 	else
 	{
 		GLogger.FmtWrite(ELogLevel::Warning, "InitNames: IProfile::GetGNames() returned invalid address (0x{:X}), falling back to UEAnalyzerKitty...\n", GNames);
+	}
 
+	if (!bSuccess)
+	{
 		auto Result = Generator::Analyzer.Find(UEAnalyzerKitty::Targets::Names);
 
 		GLogger.FmtWrite(ELogLevel::Info, "InitNames: UEAnalyzerKitty returned {} GNames candidate(s).\n", Result.Candidates.size());
@@ -451,6 +482,12 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Stride: 0x{:X}\n", (uint32_t)L->FNameEntry.Stride);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Header: 0x{:X}\n", (uint32_t)L->FNameEntry.Header);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::String: 0x{:X}\n", (uint32_t)L->FNameEntry.String);
+		{
+			if (L->FNameEntry.LengthShift != -1)
+				GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::LengthShift: 0x{:X} (Optional)\n", (uint32_t)L->FNameEntry.LengthShift);
+			if (L->FNameEntry.WideMask != -1)
+				GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::WideMask: 0x{:X} (Optional)\n", (uint32_t)L->FNameEntry.WideMask);
+		}
 	}
 	else
 	{
@@ -464,6 +501,10 @@ bool Generator::InitNames(std::string& OutErrorString)
 		}
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::String: 0x{:X}\n", (uint32_t)L->FNameEntry.String);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Index: 0x{:X}\n", (uint32_t)L->FNameEntry.Index);
+		{
+			if (L->FNameEntry.WideMask != -1)
+				GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::WideMask: 0x{:X} (Optional)\n", (uint32_t)L->FNameEntry.WideMask);
+		}
 	}
 
 	NameArray::SetByIndexFn([](int32 Index) -> uintptr_t
@@ -716,6 +757,9 @@ bool Generator::InitInternalSettings(std::string& OutErrorString)
 
 	GLogger.FmtWrite(ELogLevel::Info, "GameName: {}\n", InternalSettings::GameName);
 	GLogger.FmtWrite(ELogLevel::Info, "GameVersion: {}\n", InternalSettings::GameVersion);
+	GLogger.FmtWrite(ELogLevel::Info, "EngineVersion: {}.{}.{}\n", InternalSettings::EngineMajor, InternalSettings::EngineMinor, InternalSettings::EnginePatch);
+	GLogger.FmtWrite(ELogLevel::Info, "EngineVersionString: {}\n", InternalSettings::EngineVersionString);
+	GLogger.FmtWrite(ELogLevel::Info, "UnrealModuleFileName: {}\n", InternalSettings::UnrealModuleFileName);
 	GLogger.FmtWrite(ELogLevel::Info, "bIsEnumNameOnly: {}\n", InternalSettings::bIsEnumNameOnly);
 	GLogger.FmtWrite(ELogLevel::Info, "bIsSmallEnumValue: {}\n", InternalSettings::bIsSmallEnumValue);
 	GLogger.FmtWrite(ELogLevel::Info, "bHasUnderlayingTypeInUEnum: {}\n", InternalSettings::bHasUnderlayingTypeInUEnum);
@@ -731,6 +775,8 @@ bool Generator::InitInternalSettings(std::string& OutErrorString)
 	GLogger.FmtWrite(ELogLevel::Info, "bUseLargeWorldCoordinates: {}\n", InternalSettings::bUseLargeWorldCoordinates);
 	GLogger.FmtWrite(ELogLevel::Info, "bUseUint8ArrayDim: {}\n", InternalSettings::bUseUint8ArrayDim);
 	GLogger.FmtWrite(ELogLevel::Info, "bUseChar16String: {}\n", InternalSettings::bUseChar16String);
+	GLogger.FmtWrite(ELogLevel::Info, "bIsGObjectsPointer: {}\n", InternalSettings::bIsGObjectsPointer);
+	GLogger.FmtWrite(ELogLevel::Info, "bIsGNamesPointer: {}\n", InternalSettings::bIsGNamesPointer);
 
 	return true;
 }

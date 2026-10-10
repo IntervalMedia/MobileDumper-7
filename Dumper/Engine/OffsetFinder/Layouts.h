@@ -67,6 +67,11 @@ struct FNameArrayLayout : public INamesLayout
 		/// @brief Returns true when the raw packed index field indicates a UTF-16 name.
 		std::function<bool(int32)> GetIsWide;
 
+		/// @brief Mask GetIsWide tests in the packed index. Optional: -1 when a custom
+		/// predicate replaced it. Mirrors GetIsWide as plain data so the generated SDK can
+		/// express it in source, which a std::function cannot be.
+		int32 WideMask;
+
 		/// @brief True when every required entry offset has been resolved.
 		inline bool IsValid() const { return Index != -1 && String != -1; }
 	} FNameEntry;
@@ -75,7 +80,7 @@ struct FNameArrayLayout : public INamesLayout
 	    : Chunks(0x0),
 	      ElementsPerChunk(0x4000),
 	      NumElements(-1),
-	      FNameEntry({-1, -1})
+	      FNameEntry({-1, -1, nullptr, 0x1})
 	{
 	}
 
@@ -117,6 +122,14 @@ struct FNamePoolLayout : public INamesLayout
 		/// @brief Extracts the name length from a raw FNameEntry header.
 		std::function<int32(uint16)> GetLength;
 
+		/// @brief Right-shift GetLength applies to the header. Optional: -1 when a custom
+		/// extractor replaced it. Mirrors GetLength as plain data so the generated SDK can
+		/// express it in source, which a std::function cannot be.
+		int32 LengthShift;
+		/// @brief Mask GetIsWide tests in the header. Optional: -1 when a custom predicate
+		/// replaced it.
+		int32 WideMask;
+
 		/// @brief True when every required entry offset has been resolved.
 		inline bool IsValid() const { return Stride != -1 && Header != -1 && String != -1 && GetIsWide && GetLength; }
 	} FNameEntry;
@@ -126,7 +139,7 @@ struct FNamePoolLayout : public INamesLayout
 	      MaxChunkIndex(-1),
 	      ByteCursor(-1),
 	      Blocks(-1),
-	      FNameEntry({-1, -1, -1, nullptr, nullptr})
+	      FNameEntry({-1, -1, -1, nullptr, nullptr, -1, 0x1})
 	{
 	}
 

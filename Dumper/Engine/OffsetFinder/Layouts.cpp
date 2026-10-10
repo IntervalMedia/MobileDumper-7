@@ -1292,6 +1292,8 @@ namespace LayoutDetection
 						Candidate.FNameEntry.Stride    = Stride;
 						Candidate.FNameEntry.GetLength = OverrideGetLength;
 						Candidate.FNameEntry.GetIsWide = OverrideGetIsWide ? OverrideGetIsWide : DefaultGetIsWide;
+						Candidate.FNameEntry.LengthShift = -1;
+						Candidate.FNameEntry.WideMask    = OverrideGetIsWide ? -1 : kDefaultNameWideMask;
 
 						const int32 Walk = WalkPoolEntries(BlockStart, Candidate, nullptr);
 						if (Walk > BestWalk)
@@ -1318,6 +1320,8 @@ namespace LayoutDetection
 							Candidate.FNameEntry.GetLength = [Shift](uint16 H) -> int32
 							{ return H >> Shift; };
 							Candidate.FNameEntry.GetIsWide = OverrideGetIsWide ? OverrideGetIsWide : DefaultGetIsWide;
+							Candidate.FNameEntry.LengthShift = Shift;
+							Candidate.FNameEntry.WideMask    = OverrideGetIsWide ? -1 : kDefaultNameWideMask;
 
 							const int32 Walk = WalkPoolEntries(BlockStart, Candidate, nullptr);
 							if (Walk > BestWalk)
@@ -2363,15 +2367,24 @@ namespace LayoutDetection
 		{
 			FNamePoolLayout* Pool = static_cast<FNamePoolLayout*>(Result.Layout.get());
 			if (Options.PoolGetLength)
-				Pool->FNameEntry.GetLength = Options.PoolGetLength;
+			{
+				Pool->FNameEntry.GetLength    = Options.PoolGetLength;
+				Pool->FNameEntry.LengthShift = -1;
+			}
 			if (Options.PoolGetIsWide)
+			{
 				Pool->FNameEntry.GetIsWide = Options.PoolGetIsWide;
+				Pool->FNameEntry.WideMask  = -1;
+			}
 		}
 		else
 		{
 			FNameArrayLayout* Arr = static_cast<FNameArrayLayout*>(Result.Layout.get());
 			if (Options.ArrayGetIsWide)
+			{
 				Arr->FNameEntry.GetIsWide = Options.ArrayGetIsWide;
+				Arr->FNameEntry.WideMask  = -1;
+			}
 		}
 
 		Result.Details.push_back(fmt::format("DetectNamesLayout: Selected: {}, confidence {:.1f}%",

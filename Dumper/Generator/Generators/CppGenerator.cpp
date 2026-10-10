@@ -4413,6 +4413,41 @@ namespace Offsets
 	                        GInSDKOffsets.Statics.PEOffset,
 	                        GInSDKOffsets.Statics.PEIndex);
 
+	/* Engine build info, as detected. TCharSize is the width of one TCHAR in the target, which the
+	   name-reading helpers below depend on; it is measured from the target, not assumed from the
+	   engine version, because forks change it independently. */
+	BasicHpp << fmt::format(R"(
+namespace EngineInfo
+{{
+	static constexpr int32 EngineMajor = {};
+	static constexpr int32 EngineMinor = {};
+	static constexpr int32 EnginePatch = {};
+
+	/* Full version as the engine formats it. Empty when detection could not find it. */
+	static constexpr const char* EngineVersion = "{}";
+
+	/* sizeof(TCHAR) in the target: 2 for char16_t, 4 for a 4-byte wchar_t. */
+	static constexpr int32 TCharSize = {};
+
+	/* The module every Offsets::* value is measured against. GetImageBase() looks this name up at
+	   runtime; change it if the library is renamed. */
+	static constexpr const char* UnrealModuleName = "{}";
+}}
+)",
+	                        InternalSettings::EngineMajor,
+	                        InternalSettings::EngineMinor,
+	                        InternalSettings::EnginePatch,
+	                        InternalSettings::EngineVersionString,
+	                        InternalSettings::bUseChar16String ? 2 : 4,
+	                        InternalSettings::UnrealModuleFileName);
+
+
+	/* NAME_SIZE, the engine's own bound on a name character buffer. Shared by the default name
+	   accessor bodies below, by FNameEntry and by FStringData. FNameEntry declares its String as
+	   plain char because the buffer is a read window onto a packed, variable-length record -- pool
+	   entries are not NUL-terminated, so the length comes from Header -- and the wide form is
+	   reached by casting. */
+	constexpr int32 NameBufferSize = 0x400;
 
 	// Start Namespace 'InSDKUtils'
 	BasicHpp <<
@@ -4437,6 +4472,21 @@ namespace InSDKUtils
 	/* Custom 'GetObjectByIndex' function */
 	BasicHpp << "\tUObject* GetObjectByIndex(int32 Index);\n\n";
 
+	/* Module-name matching, used by the default GetImageBase body. */
+	BasicHpp << R"(	/* True when Path's filename is EngineInfo::UnrealModuleName. A plain suffix test would also
+	   accept "notlibUE4.so", so a separator is required before the name. */
+	bool PathEndsWithModuleName(const char* Path);
+
+)";
+
+	/* Width-aware string decoder used by the default GetNameByIndex body. */
+	BasicHpp << R"(	/* Decodes NumChars characters at CharSize bytes each into UTF-8. CharSize is 1 for an ANSI
+	   name and EngineInfo::TCharSize for a wide one; UTF-16 surrogate pairs are joined, and a
+	   lone surrogate or an out-of-range code point is replaced rather than emitted raw. Pass
+	   bStopAtNul for a NUL-terminated buffer, where NumChars is only an upper bound. */
+	std::string DecodeNameString(const void* Data, int32 NumChars, int32 CharSize, bool bStopAtNul);
+
+)";
 
 	/* GetVirtualFunction(const void* ObjectInstance, int32 Index) function */
 	BasicHpp << R"(	template<typename FuncType>
@@ -4454,38 +4504,412 @@ namespace InSDKUtils
 	BasicHpp << "}\n\n";
 	// End Namespace 'InSDKUtils'
 
+	/* Headers and the name match the default GetImageBase body needs. Emitted here rather than in
+	   Basic.hpp so an SDK with a user-supplied GetImageBase still pulls in nothing platform-specific. */
+	BasicCpp << R"(
+#include <cstdint>
+#include <cstring>
+
+#if defined(__APPLE__)
+	#include <mach-o/dyld.h>
+#else
+	#include <link.h>
+#endif
+
+bool InSDKUtils::PathEndsWithModuleName(const char* Path)
+{
+	if (!Path)
+		return false;
+
+	const size_t PathLen = std::strlen(Path);
+	const size_t NameLen = std::strlen(EngineInfo::UnrealModuleName);
+
+	if (NameLen == 0 || PathLen < NameLen)
+		return false;
+
+	if (std::strcmp(Path + (PathLen - NameLen), EngineInfo::UnrealModuleName) != 0)
+		return false;
+
+	return PathLen == NameLen || Path[PathLen - NameLen - 1] == '/';
+}
+
+)";
+
+	/* Default 'GetImageBase' body. Every Offsets::* value is relative to ModuleInfo::GetBase() as the
+	   dumper saw it, and the two platforms define that differently: on Android it is the module's
+	   load base, on iOS the image's ASLR slide (offsets there are un-slid VAs). Each branch returns
+	   the one its own platform's dump was measured against. */
+	const std::string DefaultGetImageBaseBody =
+	    R"({
+	/* Resolved once: the module cannot move, and the lookup walks every loaded image. */
+	static uintptr_t Cached = 0;
+
+	if (Cached)
+		return Cached;
+
+#if defined(__APPLE__)
+	for (uint32_t i = 0; i < _dyld_image_count(); i++)
+	{
+		const char* Name = _dyld_get_image_name(i);
+
+		if (!Name || !InSDKUtils::PathEndsWithModuleName(Name))
+			continue;
+
+		/* The slide, not the header address: offsets in this SDK are un-slid virtual addresses. */
+		Cached = static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(i));
+		return Cached;
+	}
+#else
+	dl_iterate_phdr(
+	    [](struct dl_phdr_info* Info, size_t, void* Out) -> int
+	    {
+		    if (!Info->dlpi_name || !InSDKUtils::PathEndsWithModuleName(Info->dlpi_name))
+			    return 0;
+
+		    /* dlpi_addr is the load bias; the base offsets are measured from is the lowest mapped
+		       address, which is the bias plus the smallest PT_LOAD vaddr. They are equal whenever
+		       the first PT_LOAD sits at 0, which is usual but not guaranteed. */
+		    uintptr_t Lowest = UINTPTR_MAX;
+
+		    for (uint16_t p = 0; p < Info->dlpi_phnum; p++)
+		    {
+			    if (Info->dlpi_phdr[p].p_type == PT_LOAD && Info->dlpi_phdr[p].p_vaddr < Lowest)
+				    Lowest = Info->dlpi_phdr[p].p_vaddr;
+		    }
+
+		    *static_cast<uintptr_t*>(Out) = static_cast<uintptr_t>(Info->dlpi_addr) + (Lowest == UINTPTR_MAX ? 0 : Lowest);
+		    return 1;
+	    },
+	    &Cached);
+#endif
+
+	return Cached;
+}
+)";
+
 	/* Custom 'GetImageBase' function */
 	BasicCpp << fmt::format(R"(uintptr_t InSDKUtils::GetImageBase()
 {})",
-	                        GSettings.CppGenerator.GetImageBaseFuncBody);
+	                        GSettings.CppGenerator.GetImageBaseFuncBody.empty() ? DefaultGetImageBaseBody : GSettings.CppGenerator.GetImageBaseFuncBody);
 
 	BasicCpp << "\n";
 
-	/* Custom 'GetGNames' function */
+	/* The name decoder. The character count is clamped to NAME_SIZE before the loop starts, so a
+	   corrupt length cannot walk past the entry's buffer. */
+	BasicCpp << fmt::format(R"(
+static void AppendAsUtf8(std::string& Out, uint32 CodePoint)
+{{
+	/* Lone surrogates and anything past the Unicode maximum are not encodable. */
+	if (CodePoint > 0x10FFFF || (CodePoint >= 0xD800 && CodePoint <= 0xDFFF))
+		CodePoint = 0xFFFD;
+
+	if (CodePoint < 0x80)
+	{{
+		Out += static_cast<char>(CodePoint);
+	}}
+	else if (CodePoint < 0x800)
+	{{
+		Out += static_cast<char>(0xC0 | (CodePoint >> 6));
+		Out += static_cast<char>(0x80 | (CodePoint & 0x3F));
+	}}
+	else if (CodePoint < 0x10000)
+	{{
+		Out += static_cast<char>(0xE0 | (CodePoint >> 12));
+		Out += static_cast<char>(0x80 | ((CodePoint >> 6) & 0x3F));
+		Out += static_cast<char>(0x80 | (CodePoint & 0x3F));
+	}}
+	else
+	{{
+		Out += static_cast<char>(0xF0 | (CodePoint >> 18));
+		Out += static_cast<char>(0x80 | ((CodePoint >> 12) & 0x3F));
+		Out += static_cast<char>(0x80 | ((CodePoint >> 6) & 0x3F));
+		Out += static_cast<char>(0x80 | (CodePoint & 0x3F));
+	}}
+}}
+
+std::string InSDKUtils::DecodeNameString(const void* Data, int32 NumChars, int32 CharSize, bool bStopAtNul)
+{{
+	if (!Data || NumChars <= 0)
+		return "";
+
+	if (CharSize != 1 && CharSize != 2 && CharSize != 4)
+		return "";
+
+	/* NAME_SIZE is the engine's own bound on a name, so a larger count is corrupt rather than big. */
+	if (NumChars > 0x{:X})
+		NumChars = 0x{:X};
+
+	const uint8* Bytes = reinterpret_cast<const uint8*>(Data);
+
+	std::string Out;
+	Out.reserve(static_cast<size_t>(NumChars));
+
+	for (int32 i = 0; i < NumChars; i++)
+	{{
+		uint32 CodePoint = 0;
+
+		/* Assembled byte by byte rather than loaded through a uint16/uint32 pointer: a packed pool
+		   entry can place String at an odd offset, and an unaligned load there is undefined. */
+		if (CharSize == 1)
+			CodePoint = Bytes[i];
+		else if (CharSize == 2)
+			CodePoint = static_cast<uint32>(Bytes[i * 2]) | (static_cast<uint32>(Bytes[(i * 2) + 1]) << 8);
+		else
+			CodePoint = static_cast<uint32>(Bytes[i * 4]) | (static_cast<uint32>(Bytes[(i * 4) + 1]) << 8) | (static_cast<uint32>(Bytes[(i * 4) + 2]) << 16) | (static_cast<uint32>(Bytes[(i * 4) + 3]) << 24);
+
+		if (CodePoint == 0 && bStopAtNul)
+			break;
+
+		/* A UTF-16 high surrogate carries its code point jointly with the low one that follows. */
+		if (CharSize == 2 && CodePoint >= 0xD800 && CodePoint <= 0xDBFF && (i + 1) < NumChars)
+		{{
+			const uint32 Low = static_cast<uint32>(Bytes[(i + 1) * 2]) | (static_cast<uint32>(Bytes[((i + 1) * 2) + 1]) << 8);
+
+			if (Low >= 0xDC00 && Low <= 0xDFFF)
+			{{
+				CodePoint = 0x10000 + ((CodePoint - 0xD800) << 10) + (Low - 0xDC00);
+				i++;
+			}}
+		}}
+
+		AppendAsUtf8(Out, CodePoint);
+	}}
+
+	return Out;
+}}
+)",
+	                        NameBufferSize,
+	                        NameBufferSize);
+
+	BasicCpp << "\n";
+
+	/* Default bodies for the four accessors below. Each is built for the layout this game was
+	   detected to use, so the SDK works as generated; a non-empty override in GSettings replaces
+	   one outright. They all route through GetImageBase(), which stays the single thing a user has
+	   to fill in. */
+	const std::string DefaultGetGNamesBody = fmt::format(R"({{
+	/* Offsets::GNames {}. Change this if the game resolves GNames some other way. */
+	const uintptr_t Base = GetImageBase();
+
+	if (!Base)
+		return 0;
+
+{}
+}}
+)",
+	                                                     InternalSettings::bIsGNamesPointer ? "holds a pointer to the names container" : "is the names container itself",
+	                                                     InternalSettings::bIsGNamesPointer
+	                                                         ? R"(	return *reinterpret_cast<uintptr_t*>(Base + Offsets::GNames);)"
+	                                                         : R"(	return Base + Offsets::GNames;)");
+
+	const std::string DefaultGetGObjectsBody = fmt::format(R"({{
+	/* Offsets::GObjects {}. Change this if the game resolves GObjects some other way. */
+	const uintptr_t Base = GetImageBase();
+
+	if (!Base)
+		return nullptr;
+
+{}
+}}
+)",
+	                                                       InternalSettings::bIsGObjectsPointer ? "holds a pointer to the object array" : "is the object array itself",
+	                                                       InternalSettings::bIsGObjectsPointer
+	                                                           ? R"(	return *reinterpret_cast<TUObjectArray**>(Base + Offsets::GObjects);)"
+	                                                           : R"(	return reinterpret_cast<TUObjectArray*>(Base + Offsets::GObjects);)");
+
+	/* A fixed array indexes straight into one contiguous run; a chunked one selects a chunk first.
+	   TUObjectArray::GetObjects() returns FUObjectItem* in the first case and FUObjectItem** in the
+	   second, so the two expressions are not interchangeable. */
+	const bool bIsChunkedObjects = GLayouts.ObjectsLayout->GetType() != EObjectsType::Array;
+
+	const std::string DefaultGetObjectByIndexBody = bIsChunkedObjects
+	                                                    ? R"({
+	/* Chunked object array. Change this if the game stores its objects some other way. */
+	TUObjectArray* Objects = GetGObjects();
+
+	if (!Objects || Index < 0 || Index >= Objects->Num())
+		return nullptr;
+
+	FUObjectItem** Chunks = Objects->GetObjects();
+
+	if (!Chunks)
+		return nullptr;
+
+	FUObjectItem* Chunk = Chunks[Index / TUObjectArray::ElementsPerChunk];
+
+	if (!Chunk)
+		return nullptr;
+
+	/* Scaled by Stride, not by sizeof(FUObjectItem): C++ rounds the struct up to its alignment, so
+	   the subscript operator would drift whenever the engine's element size is not a multiple of it. */
+	const uint8* Item = reinterpret_cast<const uint8*>(Chunk) + ((Index % TUObjectArray::ElementsPerChunk) * FUObjectItem::Stride);
+
+	return reinterpret_cast<const FUObjectItem*>(Item)->Object;
+}
+)"
+	                                                    : R"({
+	/* Fixed object array. Change this if the game stores its objects some other way. */
+	TUObjectArray* Objects = GetGObjects();
+
+	if (!Objects || Index < 0 || Index >= Objects->Num())
+		return nullptr;
+
+	FUObjectItem* Items = Objects->GetObjects();
+
+	if (!Items)
+		return nullptr;
+
+	/* Scaled by Stride, not by sizeof(FUObjectItem): C++ rounds the struct up to its alignment, so
+	   the subscript operator would drift whenever the engine's element size is not a multiple of it. */
+	const uint8* Item = reinterpret_cast<const uint8*>(Items) + (Index * FUObjectItem::Stride);
+
+	return reinterpret_cast<const FUObjectItem*>(Item)->Object;
+}
+)";
+
+	std::string DefaultGetNameByIndexBody;
+
+	if (GLayouts.NamesLayout->GetType() == ENamesType::Array)
+	{
+		const auto NameLayout = reinterpret_cast<FNameArrayLayout*>(GLayouts.NamesLayout.get());
+
+		/* The legacy container holds its chunk table inline, so the table base is the address of the
+		   Chunks member rather than its value. Entries are NUL-terminated, and the packed Index field
+		   carries the wide flag in its low bit. */
+		const std::string WideTest = NameLayout->FNameEntry.WideMask == -1
+		                                 ? "false /* this game uses a custom wide-name predicate: supply it here */"
+		                                 : fmt::format("(Entry->Index & 0x{:X}) != 0", NameLayout->FNameEntry.WideMask);
+
+		DefaultGetNameByIndexBody = fmt::format(R"({{
+	/* Legacy TNameEntryArray: ordinal chunk indexing, NUL-terminated entries.
+	   Change this if the game stores its names some other way. */
+	TNameEntryArray* Names = reinterpret_cast<TNameEntryArray*>(GetGNames());
+
+	if (!Names || Index < 0)
+		return "";
+
+	/* The chunk table is inline, so it starts at the Chunks member, not at its value. Chunks past
+	   the live count are unallocated, so an index beyond it reads a pointer that was never set. */
+	const int32 ChunkIndex = Index / TNameEntryArray::ElementsPerChunk;
+
+	FNameEntry** const* ChunkTable = reinterpret_cast<FNameEntry** const*>(&Names->Chunks);
+	FNameEntry** Chunk             = ChunkTable[ChunkIndex];
+
+	if (!Chunk)
+		return "";
+
+	FNameEntry* Entry = Chunk[Index % TNameEntryArray::ElementsPerChunk];
+
+	if (!Entry)
+		return "";
+
+	/* Legacy entries are NUL-terminated, so NAME_SIZE is only an upper bound here. */
+	const int32 CharSize = ({}) ? EngineInfo::TCharSize : 1;
+
+	return DecodeNameString(Entry->String, 0x{:X}, CharSize, true);
+}}
+)",
+		                                        WideTest,
+		                                        NameBufferSize);
+	}
+	else
+	{
+		const auto NameLayout = reinterpret_cast<FNamePoolLayout*>(GLayouts.NamesLayout.get());
+
+		/* A pool index is a block selector plus a byte offset scaled by Stride, so it is not ordinal:
+		   the entry is a packed record whose header carries both the length and the wide flag. */
+		const std::string LengthExpr = NameLayout->FNameEntry.LengthShift == -1
+		                                   ? "0 /* this game uses a custom length extractor: supply it here */"
+		                                   : fmt::format("Entry->Header >> 0x{:X}", NameLayout->FNameEntry.LengthShift);
+
+		const std::string WideTest = NameLayout->FNameEntry.WideMask == -1
+		                                 ? "false /* this game uses a custom wide-name predicate: supply it here */"
+		                                 : fmt::format("(Entry->Header & 0x{:X}) != 0", NameLayout->FNameEntry.WideMask);
+
+		const std::string OutlineNumberBlock =
+		    !InternalSettings::bUseOutlineNumberName
+		        ? ""
+		        : fmt::format(R"(
+	/* A zero length marks an outline-number entry: (FNameEntryId, Number), not characters. */
+	if (Length == 0)
+	{{
+		const uint8* Payload = reinterpret_cast<const uint8*>(Entry) + 0x{:X};
+
+		int32 BaseIndex = 0;
+		int32 Number    = 0;
+		std::memcpy(&BaseIndex, Payload, sizeof(BaseIndex));
+		std::memcpy(&Number, Payload + sizeof(BaseIndex), sizeof(Number));
+
+		if (BaseIndex == Index)
+			return "";
+
+		const std::string Base = GetNameByIndex(BaseIndex);
+
+		if (Base.empty())
+			return "";
+
+		/* The engine stores Number as the suffix plus one, with 0 meaning "no suffix". */
+		return Number > 0 ? Base + "_" + std::to_string(Number - 1) : Base;
+	}}
+)",
+		                      NameLayout->FNameEntry.String + ((NameLayout->FNameEntry.String == 6) ? 2 : 0));
+
+		DefaultGetNameByIndexBody = fmt::format(R"({{
+	/* FNamePool: the index splits into a block and a byte offset scaled by FNameEntry::Stride.
+	   Change this if the game stores its names some other way. */
+	FNamePool* Names = reinterpret_cast<FNamePool*>(GetGNames());
+
+	if (!Names || Index < 0)
+		return "";
+
+	/* The block table is inline, so it starts at the Blocks member, not at its value. */
+	const uint8* const* BlockTable = reinterpret_cast<const uint8* const*>(&Names->Blocks);
+	const uint8* Block             = BlockTable[Index >> FNamePool::BlocksBit];
+
+	if (!Block)
+		return "";
+
+	const int32 OffsetInBlock = (Index & ((1 << FNamePool::BlocksBit) - 1)) * FNameEntry::Stride;
+	const FNameEntry* Entry   = reinterpret_cast<const FNameEntry*>(Block + OffsetInBlock);
+
+	const int32 Length = {};
+{}
+	if (Length <= 0 || Length > 0x{:X})
+		return "";
+
+	/* Pool entries are packed and not NUL-terminated, so the header length is the exact extent. */
+	const int32 CharSize = ({}) ? EngineInfo::TCharSize : 1;
+
+	return DecodeNameString(Entry->String, Length, CharSize, false);
+}}
+)",
+		                                        LengthExpr,
+		                                        OutlineNumberBlock,
+		                                        NameBufferSize,
+		                                        WideTest);
+	}
+
 	BasicCpp << fmt::format(R"(uintptr_t InSDKUtils::GetGNames()
 {})",
-	                        GSettings.CppGenerator.GetGNamesFuncBody);
+	                        GSettings.CppGenerator.GetGNamesFuncBody.empty() ? DefaultGetGNamesBody : GSettings.CppGenerator.GetGNamesFuncBody);
 
 	BasicCpp << "\n";
 
-	/* Custom 'GetGObject' function */
 	BasicCpp << fmt::format(R"(TUObjectArray* InSDKUtils::GetGObjects()
 {})",
-	                        GSettings.CppGenerator.GetGObjectsBody);
+	                        GSettings.CppGenerator.GetGObjectsBody.empty() ? DefaultGetGObjectsBody : GSettings.CppGenerator.GetGObjectsBody);
 
 	BasicCpp << "\n";
 
-	/* Custom 'GetNameByIndex' function */
 	BasicCpp << fmt::format(R"(std::string InSDKUtils::GetNameByIndex(int32 Index)
 {})",
-	                        GSettings.CppGenerator.GetNameByIndexFuncBody);
+	                        GSettings.CppGenerator.GetNameByIndexFuncBody.empty() ? DefaultGetNameByIndexBody : GSettings.CppGenerator.GetNameByIndexFuncBody);
 
 	BasicCpp << "\n";
 
-	/* Custom 'GetObjectByIndex' function */
 	BasicCpp << fmt::format(R"(UObject* InSDKUtils::GetObjectByIndex(int32 Index)
 {})",
-	                        GSettings.CppGenerator.GetObjectByIndexFuncBody);
+	                        GSettings.CppGenerator.GetObjectByIndexFuncBody.empty() ? DefaultGetObjectByIndexBody : GSettings.CppGenerator.GetObjectByIndexFuncBody);
 
 	BasicHpp << R"(
 namespace BasicFilesImplUtils
@@ -4705,22 +5129,34 @@ ClassType* GetDefaultObjImpl()
 		PredefinedStruct FUObjectItem = PredefinedStruct{
 		    .UniqueName = "FUObjectItem", .Size = ObjLayout->FUObjectItem.Size, .Alignment = alignof(void*), .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = false, .bIsUnion = false, .Super = nullptr};
 
-		FUObjectItem.Properties =
-		    {
-		        PredefinedMember{
-		            .Comment           = "NOT AUTO-GENERATED PROPERTY",
-		            .Type              = "class UObject*",
-		            .Name              = "Object",
-		            .Offset            = ObjLayout->FUObjectItem.Object,
-		            .Size              = sizeof(void*),
-		            .ArrayDim          = 0x1,
-		            .Alignment         = alignof(void*),
-		            .bIsStatic         = false,
-		            .bIsZeroSizeMember = false,
-		            .bIsBitField       = false,
-		            .BitIndex          = 0xFF},
-		    };
+		FUObjectItem.Properties.push_back(PredefinedMember{
+		    .Comment           = "NOT AUTO-GENERATED PROPERTY",
+		    .Type              = "constexpr int32",
+		    .Name              = "Stride",
+		    .Offset            = 0x0,
+		    .Size              = sizeof(int32),
+		    .ArrayDim          = 0x1,
+		    .Alignment         = alignof(int32),
+		    .bIsStatic         = true,
+		    .bIsZeroSizeMember = false,
+		    .bIsBitField       = false,
+		    .BitIndex          = 0xFF,
+		    .DefaultValue      = fmt::format("0x{:X}", ObjLayout->FUObjectItem.Size)});
 
+		FUObjectItem.Properties.push_back(PredefinedMember{
+		    .Comment           = "NOT AUTO-GENERATED PROPERTY",
+		    .Type              = "class UObject*",
+		    .Name              = "Object",
+		    .Offset            = ObjLayout->FUObjectItem.Object,
+		    .Size              = sizeof(void*),
+		    .ArrayDim          = 0x1,
+		    .Alignment         = alignof(void*),
+		    .bIsStatic         = false,
+		    .bIsZeroSizeMember = false,
+		    .bIsBitField       = false,
+		    .BitIndex          = 0xFF});
+
+		SortMembers(FUObjectItem.Properties);
 		GenerateStruct(&FUObjectItem, BasicHpp, BasicCpp, BasicHpp, AssertionsFile);
 
 		// Start class 'TUObjectArray'
@@ -4829,22 +5265,38 @@ ClassType* GetDefaultObjImpl()
 		PredefinedStruct FUObjectItem = PredefinedStruct{
 		    .UniqueName = "FUObjectItem", .Size = ObjLayout->FUObjectItem.Size, .Alignment = alignof(void*), .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = false, .bIsUnion = false, .Super = nullptr};
 
-		FUObjectItem.Properties =
-		    {
-		        PredefinedMember{
-		            .Comment           = "NOT AUTO-GENERATED PROPERTY",
-		            .Type              = "class UObject*",
-		            .Name              = "Object",
-		            .Offset            = ObjLayout->FUObjectItem.Object,
-		            .Size              = sizeof(void*),
-		            .ArrayDim          = 0x1,
-		            .Alignment         = alignof(void*),
-		            .bIsStatic         = false,
-		            .bIsZeroSizeMember = false,
-		            .bIsBitField       = false,
-		            .BitIndex          = 0xFF},
-		    };
+		/* The engine's element stride, which is not sizeof(FUObjectItem): C++ rounds the struct up to
+		   its alignment, so a detected size of 0x14 becomes a sizeof of 0x18 and indexing with the
+		   subscript operator would drift 4 bytes per element. Stride is what the array actually
+		   advances by, so object lookups scale by this rather than by sizeof. */
+		FUObjectItem.Properties.push_back(PredefinedMember{
+		    .Comment           = "NOT AUTO-GENERATED PROPERTY",
+		    .Type              = "constexpr int32",
+		    .Name              = "Stride",
+		    .Offset            = 0x0,
+		    .Size              = sizeof(int32),
+		    .ArrayDim          = 0x1,
+		    .Alignment         = alignof(int32),
+		    .bIsStatic         = true,
+		    .bIsZeroSizeMember = false,
+		    .bIsBitField       = false,
+		    .BitIndex          = 0xFF,
+		    .DefaultValue      = fmt::format("0x{:X}", ObjLayout->FUObjectItem.Size)});
 
+		FUObjectItem.Properties.push_back(PredefinedMember{
+		    .Comment           = "NOT AUTO-GENERATED PROPERTY",
+		    .Type              = "class UObject*",
+		    .Name              = "Object",
+		    .Offset            = ObjLayout->FUObjectItem.Object,
+		    .Size              = sizeof(void*),
+		    .ArrayDim          = 0x1,
+		    .Alignment         = alignof(void*),
+		    .bIsStatic         = false,
+		    .bIsZeroSizeMember = false,
+		    .bIsBitField       = false,
+		    .BitIndex          = 0xFF});
+
+		SortMembers(FUObjectItem.Properties);
 		GenerateStruct(&FUObjectItem, BasicHpp, BasicCpp, BasicHpp, AssertionsFile);
 
 		// Start class 'TUObjectArray'
@@ -4960,12 +5412,6 @@ ClassType* GetDefaultObjImpl()
 	}
 	// End class 'TUObjectArray'
 
-
-	/* NAME_SIZE, the engine's own bound on a name character buffer. Shared by FNameEntry below and by
-	   FStringData further down. FNameEntry declares its String as plain char because the buffer is a
-	   read window onto a packed, variable-length record -- pool entries are not NUL-terminated, so the
-	   length comes from Header -- and the wide form is reached by casting. */
-	constexpr int32 NameBufferSize = 0x400;
 
 	// Start struct 'FNameEntry' and the names container
 	if (GLayouts.NamesLayout->GetType() == ENamesType::Array)
@@ -5256,7 +5702,7 @@ ClassType* GetDefaultObjImpl()
 	/* The target's TCHAR width is measured into bUseChar16String, so name the exact-width character
 	   type it found. wchar_t cannot express either case: it is 2 bytes on MSVC and 4 on the toolchains
 	   this dumper is built with, so it would make the declared size right on one host and wrong on the
-	   other -- and 'sizeof(wchar_t)' below was already disagreeing with the hardcoded 0x800. */
+	   other. */
 	const char* WideCharType = InternalSettings::bUseChar16String ? "char16_t" : "char32_t";
 	const int32 WideCharSize = InternalSettings::bUseChar16String ? (int32)sizeof(char16_t) : (int32)sizeof(char32_t);
 
