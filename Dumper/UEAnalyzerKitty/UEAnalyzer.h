@@ -10,6 +10,7 @@
 
 #include "../Memory/IMemory.h"
 
+#include "Analysis/EngineVersionDetect.h"
 #include "Analysis/GlobalAccessHarvester.h"
 #include "Analysis/TCharDetect.h"
 #include "Core/Candidate.h"
@@ -267,6 +268,15 @@ namespace UEAnalyzerKitty
 
 		/// Stride for walking an FString buffer: 2, 4, or 0 when undetermined.
 		size_t GetTCharSize() const;
+
+		/**
+		 * @brief The engine version this build reports about itself.
+		 *
+		 * Read from the live FEngineVersion.
+		 * Invalid when no version could be located.
+		 * Measured in Analyze(); this only reports what it found.
+		 */
+		const FEngineVersionInfo& GetEngineVersion() const;
 
 		/// The options this analyzer is currently answering with.
 		const AnalyzerOptions& GetOptions() const { return Options_; }

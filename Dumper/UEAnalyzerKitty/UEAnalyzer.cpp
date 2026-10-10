@@ -12,6 +12,7 @@
 #include "Analysis/GlobalAccessHarvester.h"
 #include "Analysis/StringAnchors.h"
 #include "Analysis/StructureVerifier.h"
+#include "Analysis/EngineVersionDetect.h"
 #include "Analysis/TCharDetect.h"
 #include "Strategies/IStrategy.h"
 
@@ -78,6 +79,10 @@ namespace UEAnalyzerKitty
 		ETCharKind TChar      = ETCharKind::Unknown;
 		size_t TCharUtf16Hits = 0;
 		size_t TCharUtf32Hits = 0;
+
+		/// Measured once in Analyze() for the same reason as TChar above.
+		FEngineVersionInfo EngineVersion;
+		size_t EngineVersionCandidates = 0;
 
 		std::unordered_map<uint64_t, uint32_t> AccessRank;
 		uint32_t RankedCount = 0;
@@ -209,6 +214,7 @@ namespace UEAnalyzerKitty
 				T.Anchors.Run(Memory, State->Module, T.Strategy->ProximityAnchors());
 			}
 			State->TChar = DetectTCharKind(Memory, &State->TCharUtf16Hits, &State->TCharUtf32Hits);
+			State->EngineVersion = DetectEngineVersion(Memory, &State->EngineVersionCandidates);
 		};
 
 		bool bHarvested = false;
@@ -508,6 +514,12 @@ namespace UEAnalyzerKitty
 		default:
 			return 0;
 		}
+	}
+
+	const FEngineVersionInfo& UEAnalyzer::GetEngineVersion() const
+	{
+		static const FEngineVersionInfo Empty;
+		return State_ ? State_->EngineVersion : Empty;
 	}
 
 	LocateResult UEAnalyzer::Find(const char* TargetName, const CandidateValidator& Validator) const
