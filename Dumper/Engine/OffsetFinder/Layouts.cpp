@@ -2261,7 +2261,7 @@ namespace LayoutDetection
 		Result.Details.push_back(fmt::format("DetectObjectsLayout: Selected: {}, confidence {:.1f}%",
 		                                     Best->Type == EObjectsType::Chunked ? "FChunkedUObjectArray" : "FFixedUObjectArray",
 		                                     Best->Confidence * 100.0));
-		Result.Evidence.push_back(fmt::format("DetectObjectsLayout: Selected the {} object array layout ({:.1f}% confidenc)",
+		Result.Evidence.push_back(fmt::format("DetectObjectsLayout: Selected the {} object array layout ({:.1f}% confidence)",
 		                                      Best->Type == EObjectsType::Chunked ? "FChunkedUObjectArray" : "FFixedUObjectArray",
 		                                      Best->Confidence * 100.0));
 
