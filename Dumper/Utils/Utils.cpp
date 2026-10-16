@@ -13,6 +13,13 @@
 
 #include "Zip/zip.h"
 
+#ifdef __ANDROID__
+#include <dirent.h>
+#include <unordered_map>
+
+#include "BinderShell/BinderShellCommand.h"
+#endif
+
 namespace fs = std::filesystem;
 
 namespace Utils
@@ -635,4 +642,189 @@ namespace Utils
 			return GetManifestAttribute(Attributes, "manifest", "versionName").StringValue;
 		}
 	}
+
+#ifdef __ANDROID__
+	namespace Android
+	{
+		// Cached uid->package map, built once per run.
+		static const std::unordered_map<uid_t, std::string>& GetUidPackageMap()
+		{
+			static const std::unordered_map<uid_t, std::string> Map = []
+			{
+				std::unordered_map<uid_t, std::string> Result;
+
+				if (FILE* ListFile = fopen("/data/system/packages.list", "r"))
+				{
+					char LineBuf[1024];
+					while (fgets(LineBuf, sizeof(LineBuf), ListFile))
+					{
+						char Name[256]  = {};
+						unsigned IntUid = 0;
+
+						if (sscanf(LineBuf, "%255s %u", Name, &IntUid) == 2)
+							Result.emplace(static_cast<uid_t>(IntUid), Name);
+					}
+					fclose(ListFile);
+				}
+
+				if (!Result.empty())
+					return Result;
+
+				// Fallback: same listing via binder, no process spawned.
+				std::string Output;
+				if (BinderShell::Run("package", {"list", "packages", "-U"}, Output))
+				{
+					std::istringstream Lines(Output);
+					std::string Line;
+					while (std::getline(Lines, Line))
+					{
+						char Name[256]  = {};
+						unsigned IntUid = 0;
+
+						if (sscanf(Line.c_str(), "package:%255[^ ] uid:%u", Name, &IntUid) == 2)
+							Result.emplace(static_cast<uid_t>(IntUid), Name);
+					}
+				}
+
+				return Result;
+			}();
+
+			return Map;
+		}
+
+		bool GetPackageNameByUid(uid_t Uid, std::string& OutPackageName)
+		{
+			const auto& Map = GetUidPackageMap();
+			const auto It   = Map.find(Uid);
+			if (It == Map.end())
+				return false;
+
+			OutPackageName = It->second;
+			return true;
+		}
+
+		bool GetPackageUid(const std::string& PackageName, uid_t& OutUid)
+		{
+			for (const auto& [Uid, Name] : GetUidPackageMap())
+			{
+				if (Name == PackageName)
+				{
+					OutUid = Uid;
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		std::vector<pid_t> GetProcessIDsByUid(uid_t Uid)
+		{
+			std::vector<pid_t> Pids;
+
+			DIR* ProcDir = opendir("/proc");
+			if (!ProcDir)
+				return Pids;
+
+			struct dirent* Entry;
+			while ((Entry = readdir(ProcDir)) != nullptr)
+			{
+				const pid_t Pid = atoi(Entry->d_name);
+				if (Pid <= 0)
+					continue;
+
+				char StatusPath[64];
+				snprintf(StatusPath, sizeof(StatusPath), "/proc/%d/status", Pid);
+
+				FILE* StatusFile = fopen(StatusPath, "r");
+				if (!StatusFile)
+					continue;
+
+				char LineBuf[256];
+				while (fgets(LineBuf, sizeof(LineBuf), StatusFile))
+				{
+					unsigned RealUid = 0;
+
+					// First field of "Uid:" is the real UID.
+					if (sscanf(LineBuf, "Uid: %u", &RealUid) == 1)
+					{
+						if (RealUid == Uid)
+							Pids.push_back(Pid);
+						break;
+					}
+				}
+
+				fclose(StatusFile);
+			}
+			closedir(ProcDir);
+
+			return Pids;
+		}
+
+		// "ProcessRecord{<hex id> <pid>:<name>/<uid string>}", same text either way Output came from.
+		void ParseProcessRecords(const std::string& Output, std::unordered_map<pid_t, std::string>& OutMap)
+		{
+			const char* Needle = "ProcessRecord{";
+			size_t Pos         = 0;
+			while ((Pos = Output.find(Needle, Pos)) != std::string::npos)
+			{
+				Pos += strlen(Needle);
+
+				int Pid        = 0;
+				char Name[256] = {};
+				if (sscanf(Output.c_str() + Pos, "%*[0-9a-f] %d:%255[^/]", &Pid, Name) == 2)
+					OutMap.emplace(static_cast<pid_t>(Pid), Name);
+			}
+		}
+
+		// Cached pid->name table from ActivityManager's own records, built once per run.
+		static const std::unordered_map<pid_t, std::string>& GetProcessRecordNames()
+		{
+			static const std::unordered_map<pid_t, std::string> Map = []
+			{
+				std::unordered_map<pid_t, std::string> Result;
+
+				// Primary: dump() via binder, no process spawned.
+				std::string Output;
+				if (BinderShell::Dump("activity", {"processes"}, Output) && !Output.empty())
+				{
+					ParseProcessRecords(Output, Result);
+					if (!Result.empty())
+						return Result;
+				}
+
+				// Fallback: same data via the dumpsys binary, for whatever this device's binder
+				// setup does not cover.
+				if (FILE* Pipe = popen("dumpsys activity processes", "r"))
+				{
+					Output.clear();
+					char Buf[4096];
+					size_t NumRead;
+					while ((NumRead = fread(Buf, 1, sizeof(Buf), Pipe)) > 0)
+						Output.append(Buf, NumRead);
+					pclose(Pipe);
+
+					ParseProcessRecords(Output, Result);
+				}
+
+				return Result;
+			}();
+
+			return Map;
+		}
+
+		std::string GetProcessRole(pid_t Pid, const std::string& PackageName)
+		{
+			const auto& Map = GetProcessRecordNames();
+			const auto It   = Map.find(Pid);
+			if (It == Map.end())
+				return "unregistered";
+
+			if (It->second == PackageName)
+				return "main";
+
+			const size_t Colon = It->second.find(':');
+			return Colon != std::string::npos ? It->second.substr(Colon + 1) : It->second;
+		}
+	}
+#endif
 }

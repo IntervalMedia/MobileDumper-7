@@ -636,4 +636,23 @@ namespace Utils
 		/// @brief The manifest's android:versionName, or empty if not found.
 		std::string GetApkVersion(const uint8_t* ManifestData, size_t ManifestDataSize);
 	}
+
+#ifdef __ANDROID__
+	/// @brief Android utils.
+	namespace Android
+	{
+		/// @brief Resolves a package's UID.
+		bool GetPackageUid(const std::string& PackageName, uid_t& OutUid);
+
+		/// @brief Reverse of GetPackageUid: the package name owning @p Uid.
+		bool GetPackageNameByUid(uid_t Uid, std::string& OutPackageName);
+
+		/// @brief Every running PID whose real UID is @p Uid.
+		std::vector<pid_t> GetProcessIDsByUid(uid_t Uid);
+
+		/// @brief "main", a secondary process's suffix, or "unregistered" if ActivityManager has
+		/// no record of @p Pid - immune to cmdline spoofing either way.
+		std::string GetProcessRole(pid_t Pid, const std::string& PackageName);
+	}
+#endif
 }
