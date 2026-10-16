@@ -130,7 +130,7 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		const LayoutDetection::FObjectsTestResult Test = LayoutDetection::TestObjectsLayout(ArrayAddress, GLayouts.ObjectsLayout.get());
 
 		for (const std::string& Line : Test.Details)
-			GLogger.FmtWrite(ELogLevel::Debug, "{}\n", Line);
+			GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
 
 		for (const std::string& Line : Test.Evidence)
 			GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
@@ -236,13 +236,13 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		return false;
 	}
 
-	GLogger.FmtWrite(ELogLevel::Info, "GObjects pointer: 0x{:X}\n", GObjects);
-	GLogger.FmtWrite(ELogLevel::Info, "GObjects offset: 0x{:X}\n", GInSDKOffsets.Statics.GObjects);
+	GLogger.FmtWrite(ELogLevel::Info, "GObjects Pointer: 0x{:X}\n", GObjects);
+	GLogger.FmtWrite(ELogLevel::Info, "GObjects Offset: 0x{:X}\n", GInSDKOffsets.Statics.GObjects);
 
 	if (GLayouts.ObjectsLayout->GetType() == EObjectsType::Chunked)
 	{
 		const FChunkedUObjectArrayLayout* L = static_cast<const FChunkedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
-		GLogger.FmtWrite(ELogLevel::Info, "GObjects layout type: FChunkedFixedUObjectArray\n");
+		GLogger.FmtWrite(ELogLevel::Info, "GObjects Type: FChunkedFixedUObjectArray\n");
 		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GDecryptCallbacks.ChunkedObjects.Objects(GMemory->Read<uintptr_t>(GObjects + L->Objects), GObjects + L->Objects));
 		if (L->MaxElements != -1)
 			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::MaxElements: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxElements, GDecryptCallbacks.ChunkedObjects.MaxElements(GMemory->Read<int32>(GObjects + L->MaxElements), GObjects + L->MaxElements));
@@ -254,18 +254,11 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::ElementsPerChunk: 0x{:X}\n", (uint32_t)L->ElementsPerChunk);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Object: 0x{:X}\n", (uint32_t)L->FUObjectItem.Object);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Size: 0x{:X}\n", (uint32_t)L->FUObjectItem.Size);
-
-		/*
-		for (int i = 0; i < 0x90; i += 4)
-		{
-		    GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray[0x{:X}] = 0x{:X}\n", i, GMemory->Read<int32>(GObjects + i));
-		}
-		*/
 	}
 	else
 	{
 		const FFixedUObjectArrayLayout* L = static_cast<const FFixedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
-		GLogger.FmtWrite(ELogLevel::Info, "GObjects layout type: FFixedUObjectArray\n");
+		GLogger.FmtWrite(ELogLevel::Info, "GObjects Type: FFixedUObjectArray\n");
 		GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GDecryptCallbacks.FixedObjects.Objects(GMemory->Read<uintptr_t>(GObjects + L->Objects), GObjects + L->Objects));
 		if (L->MaxObjects != -1)
 			GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::MaxObjects: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxObjects, GDecryptCallbacks.FixedObjects.MaxObjects(GMemory->Read<int32>(GObjects + L->MaxObjects), GObjects + L->MaxObjects));
@@ -361,7 +354,7 @@ bool Generator::InitNames(std::string& OutErrorString)
 		const LayoutDetection::FNamesTestResult Test = LayoutDetection::TestNamesLayout(NamesAddress, GLayouts.NamesLayout.get());
 
 		for (const std::string& Line : Test.Details)
-			GLogger.FmtWrite(ELogLevel::Debug, "{}\n", Line);
+			GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
 
 		for (const std::string& Line : Test.Evidence)
 			GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
@@ -462,15 +455,15 @@ bool Generator::InitNames(std::string& OutErrorString)
 		return false;
 	}
 
-	GLogger.FmtWrite(ELogLevel::Info, "GNames pointer: 0x{:X}\n", GNames);
-	GLogger.FmtWrite(ELogLevel::Info, "GNames offset: 0x{:X}\n", GInSDKOffsets.Statics.GNames);
+	GLogger.FmtWrite(ELogLevel::Info, "GNames Pointer: 0x{:X}\n", GNames);
+	GLogger.FmtWrite(ELogLevel::Info, "GNames Offset: 0x{:X}\n", GInSDKOffsets.Statics.GNames);
 
 	if (GLayouts.NamesLayout->GetType() == ENamesType::Pool)
 	{
 		InternalSettings::bUseNamePool = true;
 
 		const FNamePoolLayout* L = static_cast<const FNamePoolLayout*>(GLayouts.NamesLayout.get());
-		GLogger.FmtWrite(ELogLevel::Info, "GNames layout type: FNamePool\n");
+		GLogger.FmtWrite(ELogLevel::Info, "GNames Type: FNamePool\n");
 		GLogger.FmtWrite(ELogLevel::Info, "FNamePool::BlocksBit: 0x{:X}\n", (uint32_t)L->BlocksBit);
 		{
 			if (L->MaxChunkIndex != -1)
@@ -492,7 +485,7 @@ bool Generator::InitNames(std::string& OutErrorString)
 	else
 	{
 		const FNameArrayLayout* L = static_cast<const FNameArrayLayout*>(GLayouts.NamesLayout.get());
-		GLogger.FmtWrite(ELogLevel::Info, "GNames layout type: TNameArray\n");
+		GLogger.FmtWrite(ELogLevel::Info, "GNames Type: TNameArray\n");
 		GLogger.FmtWrite(ELogLevel::Info, "TNameArray::ElementsPerChunk: 0x{:X}\n", (uint32_t)L->ElementsPerChunk);
 		GLogger.FmtWrite(ELogLevel::Info, "TNameArray::Chunks: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Chunks, GDecryptCallbacks.NameArray.Chunks(GMemory->Read<uintptr_t>(GNames + L->Chunks), GNames + L->Chunks));
 		{
