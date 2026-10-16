@@ -17,6 +17,9 @@ class FMemoryAndroid : public IMemory
 	/// @brief Process ID of the target application.
 	pid_t ProcessId;
 
+	/// @brief Real package name, set via SetProcessRealName(), When empty falls back to cmdline.
+	std::string ProcessRealName;
+
 	/// @brief Memory operation mode used by KittyMemoryEx.
 	EKittyMemOP KittyMemOp;
 
@@ -102,7 +105,11 @@ public:
 	bool Initialize() override;
 
 	/// @copydoc IMemory::GetProcessName
+	/// Returns ProcessRealName when set, else reads cmdline as usual.
 	std::string GetProcessName() const override;
+
+	/// @brief Sets the real package name, bypassing cmdline. Pass "" to clear.
+	void SetProcessRealName(const std::string& Name) { ProcessRealName = Name; }
 
 	/// @copydoc IMemory::GetProcessID
 	int GetProcessID() const override;

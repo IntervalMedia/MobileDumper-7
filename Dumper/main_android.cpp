@@ -29,6 +29,7 @@
 #include "Memory/IMemory.h"
 #include "Memory/MemoryAndroid.h"
 #include "Profile/IProfile.h"
+#include "Utils/Utils.h"
 
 #ifdef DUMPER_BUILD_EXECUTABLE
 #include "Utils/argsparse/argsparse.hpp"
@@ -116,6 +117,8 @@ bool RunDump(int GamePid, const std::string& GamePackage, EKittyMemOP MemOp = EK
 	}
 
 	GMemory = std::make_unique<FMemoryAndroid>(GamePid, MemOp);
+
+	static_cast<FMemoryAndroid*>(GMemory.get())->SetProcessRealName(GamePackage);
 
 #if defined(__LP64__)
 	GArchDecoder = CreateArchDecoder(EArch::Arm64);
@@ -268,7 +271,7 @@ extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM*, void*)
 
 bool ReadIntegerInput(int& OutputValue);
 bool ChooseUserProcess(pid_t& OutPid, std::string& OutId);
-bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, pid_t& OutPid);
+bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, const std::string& PackageName, pid_t& OutPid);
 bool ChooseMemoryAccessType(int& OutMemAccessType);
 bool ChooseOutputDirectory(std::string& OutOutputDir);
 
@@ -336,13 +339,26 @@ int main(int Argc, char** Args)
 	else
 	{
 		auto GamePids = KittyMemoryEx::getProcessIDs(GamePackge);
+
+		// Fallback: cmdline can be spoofed, UID can't.
+		if (GamePids.empty())
+		{
+			uid_t PackageUid = 0;
+			if (Utils::Android::GetPackageUid(GamePackge, PackageUid))
+			{
+				GamePids = Utils::Android::GetProcessIDsByUid(PackageUid);
+				if (!GamePids.empty())
+					GLogger.FmtWrite(ELogLevel::Warning, "No process matched \"{}\" by cmdline (possibly spoofed), Found {} by UID {} instead.\n", GamePackge, GamePids.size(), PackageUid);
+			}
+		}
+
 		if (GamePids.empty())
 		{
 			GLogger.FmtWrite(ELogLevel::Error, "Couldn't find target package \"{}\" in the running processes.\n", GamePackge);
 			return 1;
 		}
 
-		if (!ChooseProcessFromMultiple(GamePids, GamePid))
+		if (!ChooseProcessFromMultiple(GamePids, GamePackge, GamePid))
 		{
 			GLogger.FmtWrite(ELogLevel::Error, "Failed to select process ID.\n");
 			return 1;
@@ -413,6 +429,7 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 	{
 		pid_t Pid;
 		std::string Name;
+		std::string Role;
 	};
 
 	std::vector<UserProcessEntry> UserProcesses;
@@ -458,6 +475,13 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 		CmdlineBuf[CmdlineLen] = '\0';
 		std::string ProcName(CmdlineBuf);
 
+		// cmdline can be spoofed, prefer the name UID resolves to.
+		KittyMemoryEx::ProcStatus Status{};
+		KittyMemoryEx::ProcStatus::parse(Pid, &Status);
+		std::string RealName;
+		if (Utils::Android::GetPackageNameByUid(static_cast<uid_t>(Status.getInt("Uid")), RealName))
+			ProcName = RealName;
+
 		if (!std::isalpha(ProcName[0]))
 			continue;
 		if (ProcName.find('.') == std::string::npos)
@@ -479,8 +503,6 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 		if (!fs::exists(KittyUtils::Android::getAppExternalFilesDir(ProcName)))
 			continue;
 
-		KittyMemoryEx::ProcStatus Status{};
-		KittyMemoryEx::ProcStatus::parse(Pid, &Status);
 		std::string State = Status.getString("State");
 		if (State.empty() || State[0] == 'Z' || State[0] == 'X')
 			continue;
@@ -489,7 +511,7 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 		if (kill(Pid, 0) != 0 && errno != EPERM)
 			continue;
 
-		UserProcesses.push_back({Pid, ProcName});
+		UserProcesses.push_back({Pid, ProcName, Utils::Android::GetProcessRole(Pid, ProcName)});
 	}
 	closedir(ProcDir);
 
@@ -509,10 +531,14 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 	             << COLOR_CYAN << "│" << COLOR_RESET << "\n";
 
 	size_t MaxProcessNameLength = 0;
+	size_t MaxPidLength         = 0;
+	bool bAnyRoleKnown          = false;
 
 	for (const auto& Process : UserProcesses)
 	{
 		MaxProcessNameLength = std::max(MaxProcessNameLength, Process.Name.length());
+		MaxPidLength         = std::max(MaxPidLength, std::to_string(Process.Pid).length());
+		bAnyRoleKnown |= Process.Role != "unregistered";
 	}
 
 	for (size_t i = 0; i < UserProcesses.size(); ++i)
@@ -529,10 +555,15 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 		             << std::right
 		             << std::setfill('0') << std::setw(2) << (i + 1)
 		             << std::setfill(' ') << "]  "
-		             << COLOR_BOLD << Color << std::left << std::setw(MaxProcessNameLength)
-		             << UserProcesses[i].Name << COLOR_RESET
-		             << "  PID: " << COLOR_BOLD << Color << UserProcesses[i].Pid << COLOR_RESET
-		             << "\n";
+		             << COLOR_BOLD << Color << std::left << std::setw(MaxPidLength)
+		             << UserProcesses[i].Pid << COLOR_RESET
+		             << "  " << COLOR_BOLD << Color << std::left << std::setw(MaxProcessNameLength)
+		             << UserProcesses[i].Name << COLOR_RESET;
+
+		if (bAnyRoleKnown)
+			LayoutStream << COLOR_GRAY << "  [" << UserProcesses[i].Role << "]" << COLOR_RESET;
+
+		LayoutStream << "\n";
 	}
 
 	LayoutStream << COLOR_CYAN << "└──" << COLOR_RESET << " Select index "
@@ -552,7 +583,7 @@ bool ChooseUserProcess(pid_t& OutPid, std::string& OutId)
 	return true;
 }
 
-bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, pid_t& OutPid)
+bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, const std::string& PackageName, pid_t& OutPid)
 {
 	if (Pids.empty())
 	{
@@ -565,6 +596,16 @@ bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, pid_t& OutPid)
 		return true;
 	}
 
+	std::vector<std::string> Roles;
+	size_t MaxPidLength = 0;
+	bool bAnyRoleKnown  = false;
+	for (const pid_t Pid : Pids)
+	{
+		Roles.push_back(Utils::Android::GetProcessRole(Pid, PackageName));
+		MaxPidLength = std::max(MaxPidLength, std::to_string(Pid).length());
+		bAnyRoleKnown |= Roles.back() != "unregistered";
+	}
+
 	std::stringstream LayoutStream;
 	LayoutStream << "\n"
 	             << COLOR_BOLD << COLOR_YELLOW << "┌── Multiple Instances Detected" << COLOR_RESET << "\n"
@@ -573,8 +614,19 @@ bool ChooseProcessFromMultiple(const std::vector<pid_t>& Pids, pid_t& OutPid)
 
 	for (size_t i = 0; i < Pids.size(); ++i)
 	{
-		LayoutStream << COLOR_YELLOW << "├──" << COLOR_RESET << " [" << COLOR_BOLD << (i + 1) << COLOR_RESET << "] "
-		             << "PID: " << COLOR_YELLOW << Pids[i] << COLOR_RESET << "\n";
+		LayoutStream << COLOR_YELLOW << "├──" << COLOR_RESET
+		             << " ["
+		             << std::right
+		             << std::setfill('0') << std::setw(2) << (i + 1)
+		             << std::setfill(' ') << "]  "
+		             << COLOR_BOLD << COLOR_YELLOW << std::left << std::setw(MaxPidLength)
+		             << Pids[i] << COLOR_RESET
+		             << "  " << COLOR_BOLD << COLOR_YELLOW << PackageName << COLOR_RESET;
+
+		if (bAnyRoleKnown)
+			LayoutStream << COLOR_GRAY << "  [" << Roles[i] << "]" << COLOR_RESET;
+
+		LayoutStream << "\n";
 	}
 
 	LayoutStream << COLOR_YELLOW << "└──" << COLOR_RESET << " Select index "

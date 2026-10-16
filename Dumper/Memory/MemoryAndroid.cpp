@@ -22,7 +22,7 @@ int FMemoryAndroid::GetProcessID() const
 
 std::string FMemoryAndroid::GetProcessName() const
 {
-	return KittyMemMgr.processName();
+	return ProcessRealName.empty() ? KittyMemMgr.processName() : ProcessRealName;
 }
 
 bool FMemoryAndroid::RefreshMemory()
