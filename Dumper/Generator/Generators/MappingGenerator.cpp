@@ -420,8 +420,8 @@ void MappingGenerator::GenerateFileHeader(StreamType& InUsmap, const std::string
 	/* We're on 'ExplicitEnumValues' version, we need to write 'bool' (aka int32) bHasVersioning. (NoVersioning = false) -> no [int32 UE4Version, int32 UE5Version] and no [uint32 NetCL] */
 	WriteToStream(InUsmap, static_cast<int32>(false));
 
-	/* Create a string_view to avoid expensive heap allocation each time we need.str().data() */
-	std::string_view DataView     = Data.view();
+	const std::string DataString  = Data.str();
+	std::string_view DataView      = DataString;
 	const uint32 UncompressedSize = static_cast<uint32>(DataView.length());
 
 	const auto CompressionMethod = GSettings.MappingGenerator.CompressionMethod;

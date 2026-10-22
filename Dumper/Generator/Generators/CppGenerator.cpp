@@ -20,7 +20,7 @@
 #include "../Managers/MemberManager.h"
 #include "../Wrappers/MemberWrappers.h"
 
-constexpr std::string GetTypeFromSize(uint8 Size, bool bIsSigned = false)
+std::string GetTypeFromSize(uint8 Size, bool bIsSigned = false)
 {
 	switch (Size)
 	{

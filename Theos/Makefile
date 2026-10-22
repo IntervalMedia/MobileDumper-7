@@ -2,7 +2,7 @@
 ## Build from this directory: make package
 
 THEOS_PACKAGE_SCHEME ?= rootless
-TARGET  = iphone:clang:latest:14.0
+TARGET  = iphone:clang:16.5:14.0
 ARCHS   = arm64 #arm64e
 DEBUG   ?= 0
 FINALPACKAGE ?= $(DEBUG)
@@ -31,7 +31,11 @@ endif
 DISABLED_WARNINGS = -Wno-unused-parameter \
     -Wno-unused-function \
     -Wno-missing-field-initializers \
-    -Wno-deprecated-declarations
+    -Wno-deprecated-declarations \
+    -Wno-error=unguarded-availability-new \
+    -Wno-error=cpp \
+    -Wno-error=character-conversion \
+    -D_LIBCPP_DISABLE_AVAILABILITY
 
 $(TWEAK_NAME)_CCFLAGS = \
     -std=c++20 \
